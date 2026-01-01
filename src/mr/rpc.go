@@ -34,11 +34,11 @@ type EmptyArgs struct{}
 const NOT_STARTED = "not_started"
 const IN_PROGRESS = "in_progress"
 const COMPLETED = "completed"
-const WAIT = "wait"
 
 // task category
 const MAP = "map"
 const REDUCE = "reduce"
+const WAIT = "wait"
 
 type Task struct {
 	TaskInfo
@@ -56,6 +56,7 @@ type TaskInfo struct {
 type GetTaskReply struct {
 	TaskInfo TaskInfo
 	NReduce  int
+	NMap     int // Number of map tasks (needed for reduce tasks to locate all input files)
 }
 
 type MarkTaskDoneArgs struct {

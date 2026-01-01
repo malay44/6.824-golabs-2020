@@ -1,15 +1,17 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
+	"math/rand"
 	"net/rpc"
 	"os"
 	"sort"
 	"strconv"
-	"strings"
+	"time"
 )
 
 var (
@@ -38,6 +40,10 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
+type worker struct {
+	rng *rand.Rand
+}
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -48,58 +54,101 @@ func ihash(key string) int {
 
 // main/mrworker.go calls this function.
 func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []string) string) {
+	
+	w := worker{
+		// Create per-call RNG (avoids contention & predictable sequences)
+		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+
 	for true {
-		_worker(mapFn, reduceFn)
+		w._worker(mapFn, reduceFn)
 	}
 }
 
-func _worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []string) string) {
-	taskInfo, nReduce := CallGetTask()
+func (w *worker) _worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []string) string) {
+	taskInfo, nReduce, nMap := CallGetTask()
 
-	filename := taskInfo.Filename
+	switch taskInfo.Category {
+	case WAIT:
+		Debug.Printf("got wait task")
+		sleepRandom(w.rng, 200, 600)
+		return;
+	case MAP:
+		err := handleMapTask(mapFn, taskInfo.Filename, taskInfo.TaskNo, nReduce)
+		if err != nil {
+			Error.Printf("cannot write map output files: %v", err)
+			return
+		}
+		CallMarkTaskDone(*taskInfo)
+	case REDUCE:
+		err := handleReduceTask(reduceFn, taskInfo.TaskNo, nMap)
+		if err != nil {
+			Error.Printf("cannot process reduce task: %v", err)
+			return
+		}
+		CallMarkTaskDone(*taskInfo)
+	}
+}
+
+func sleepRandom(rng *rand.Rand, minMs, maxMs int64) {
+	if minMs < 0 || maxMs < minMs {
+		panic("invalid sleep bounds")
+	}
+
+	// Random duration in range
+	sleepMs := minMs + rng.Int63n(maxMs-minMs+1)
+	Debug.Printf("Sleeping for %v", sleepMs)
+	time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+}
+
+func handleMapTask(mapFn func(string, string) []KeyValue, filename string, mapTaskNo int, nReduce int) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		return fmt.Errorf("cannot open %v: %v", filename, err)
 	}
 	defer file.Close()
 
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		return fmt.Errorf("cannot read %v: %v", filename, err)
 	}
-
-	switch taskInfo.Category {
-	case MAP:
-		err = handleMapTask(mapFn, filename, string(content), nReduce)
-	case REDUCE:
-		err = handleReduceTask(reduceFn, taskInfo.TaskNo, string(content))
-	case WAIT:
-		Debug.Printf("got wait task")
-	}
-
-	if err != nil {
-		log.Fatalf("cannot append kva into bucket files: %v", err)
-	}
-	CallMarkTaskDone(*taskInfo)
-}
-
-func handleMapTask(mapFn func(string, string) []KeyValue, filename string, content string, nReduce int) error {
 	kva := mapFn(filename, string(content))
-	return divideKeysInBuckets(kva, filename, nReduce)
+	return divideKeysInBuckets(kva, mapTaskNo, nReduce)
 }
 
-func handleReduceTask(reduceFn func(string, []string) string, taskNo int, content string) error {
-	intermediate := decodeBucketContent(content)
+func handleReduceTask(reduceFn func(string, []string) string, reduceTaskNo int, nMap int) error {
+	// Read all mr-X-Y files where Y == reduceTaskNo
+	intermediate := []KeyValueFile{}
+	for mapTaskNo := range nMap {
+		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
+		file, err := os.Open(filename)
+		if err != nil {
+			// File might not exist if map task produced no output for this reduce partition
+			Debug.Printf("reduce task %d: map task %d produced no output (file %s not found)", reduceTaskNo, mapTaskNo, filename)
+			continue
+		}
+
+		content, err := io.ReadAll(file)
+		file.Close() // Close immediately after reading
+		if err != nil {
+			return fmt.Errorf("cannot read %v: %v", filename, err)
+		}
+
+		kvf := decodeBucketContent(string(content))
+		intermediate = append(intermediate, kvf...)
+	}
+
 	sort.Sort(ByKey(intermediate))
-	oname := "mr-out-" + strconv.Itoa(taskNo)
+	oname := "mr-out-" + strconv.Itoa(reduceTaskNo)
 	ofile, err := os.Create(oname)
 	if err != nil {
 		return err
 	}
+	defer ofile.Close()
 
 	//
 	// call Reduce on each distinct key in intermediate[],
-	// and print the result to mr-out-0.
+	// and print the result to mr-out-Y.
 	//
 	i := 0
 	for i < len(intermediate) {
@@ -119,69 +168,116 @@ func handleReduceTask(reduceFn func(string, []string) string, taskNo int, conten
 		i = j
 	}
 
-	ofile.Close()
-
 	return nil
 }
 
 func decodeBucketContent(content string) []KeyValueFile {
-	kvf := []KeyValueFile{}
-	lines := strings.SplitSeq(content, "\n")
+	// Decode entire JSON array at once
+	var kva []KeyValue
+	if err := json.Unmarshal([]byte(content), &kva); err != nil {
+		Debug.Printf("Failed to decode JSON array: %v\n", err)
+		return []KeyValueFile{} // Return empty slice on error
+	}
 
-	for line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue // skip malformed / empty lines
+	// Convert []KeyValue to []KeyValueFile
+	kvf := make([]KeyValueFile, len(kva))
+	for i, kv := range kva {
+		kvf[i] = KeyValueFile{
+			KeyValue: kv,
+			filename: "", // Not needed in new design
 		}
-
-		kvf = append(kvf, KeyValueFile{
-			KeyValue: KeyValue{
-				Key:   fields[0],
-				Value: fields[1],
-			},
-			filename: fields[2],
-		})
 	}
 	return kvf
 }
 
-func divideKeysInBuckets(kva []KeyValue, filename string, nReduce int) error {
-	if kva != nil {
-		intermediateContent := make([]string, nReduce)
-		for _, kv := range kva {
-			bucketNo := ihash(kv.Key) % nReduce
-			intermediateContent[bucketNo] += fmt.Sprintf("%v %v %v\n", kv.Key, kv.Value, filename)
-		}
-		for i, bucketContent := range intermediateContent {
-			err := appendToFile("r-in-"+strconv.Itoa(i), bucketContent)
-			if err != nil {
-				return err
-			}
-			Debug.Printf("appended content for bucket %v\n", i)
-		}
-	} else {
+// divideKeysInBuckets writes map output to mr-X-Y files where X is the map task number
+// and Y is the reduce partition number. Uses atomic writes (temp file + rename) for safety.
+func divideKeysInBuckets(kva []KeyValue, mapTaskNo int, nReduce int) error {
+	if kva == nil {
 		return fmt.Errorf("kva cannot be nil pointer")
+	}
+
+	// Partition keys into reduce buckets
+	buckets := make([][]KeyValue, nReduce)
+	for _, kv := range kva {
+		bucketNo := ihash(kv.Key) % nReduce
+		buckets[bucketNo] = append(buckets[bucketNo], kv)
+	}
+
+	// Write each bucket to its own file atomically as a JSON array
+	for reduceTaskNo, bucket := range buckets {
+		if len(bucket) == 0 {
+			Debug.Printf("Map task %d: Empty content for reduce partition %d\n", mapTaskNo, reduceTaskNo)
+			continue
+		}
+
+		// Encode entire bucket as a JSON array
+		jsonData, err := json.Marshal(bucket)
+		if err != nil {
+			return fmt.Errorf("failed to marshal bucket %d: %v", reduceTaskNo, err)
+		}
+
+		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
+		err = writeFileAtomically(filename, string(jsonData))
+		if err != nil {
+			return fmt.Errorf("failed to write %v: %v", filename, err)
+		}
+		Debug.Printf("Map task %d: wrote output to %v\n", mapTaskNo, filename)
 	}
 	return nil
 }
 
-func appendToFile(filename, text string) error {
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY|os.O_SYNC, 0644)
+// writeFileAtomically writes content to filename atomically by:
+// 1. Writing to a temporary file
+// 2. Syncing the file to disk
+// 3. Renaming the temp file to the final filename
+// This ensures that readers either see the complete file or nothing (no partial writes).
+func writeFileAtomically(filename, content string) error {
+	// Create temporary file in the same directory
+	tempFilename := filename + ".tmp"
+	
+	file, err := os.Create(tempFilename)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	_, err = file.WriteString(text)
-	return err
+	_, err = file.WriteString(content)
+	if err != nil {
+		file.Close()
+		os.Remove(tempFilename)
+		return err
+	}
+
+	// Sync to ensure data is written to disk before rename
+	err = file.Sync()
+	if err != nil {
+		file.Close()
+		os.Remove(tempFilename)
+		return err
+	}
+
+	err = file.Close()
+	if err != nil {
+		os.Remove(tempFilename)
+		return err
+	}
+
+	// Atomic rename: either succeeds completely or fails (no partial state)
+	err = os.Rename(tempFilename, filename)
+	if err != nil {
+		os.Remove(tempFilename)
+		return err
+	}
+
+	return nil
 }
 
-func CallGetTask() (*TaskInfo, int) {
+func CallGetTask() (*TaskInfo, int, int) {
 	args := EmptyArgs{}
 	reply := GetTaskReply{}
 
 	call("Master.GetTask", &args, &reply)
-	return &reply.TaskInfo, reply.NReduce
+	return &reply.TaskInfo, reply.NReduce, reply.NMap
 }
 
 func CallMarkTaskDone(taskInfo TaskInfo) bool {
