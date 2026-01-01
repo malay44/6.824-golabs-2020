@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+const (
+	TaskTimeout = 10 * time.Second // Timeout for task completion
+)
+
 type Master struct {
 	// Your definitions here.
 	nReduce     int
@@ -64,6 +68,7 @@ func (m *Master) MarkTaskDone(args *MarkTaskDoneArgs, reply *EmptyArgs) error {
 
 func (m *Master) findTask() *Task {
 	completedMapTasks := 0
+	completedReduceTasks := 0
 	for i := range m.mapTasks {
 		task := &m.mapTasks[i]
 		task.mu.Lock()
@@ -75,28 +80,65 @@ func (m *Master) findTask() *Task {
 			task.mu.Unlock()
 			Debug.Printf("found not started map task %v", i)
 			return task
+		case IN_PROGRESS:
+			// Check if task has timed out (more than 10 seconds)
+			if time.Since(task.StartTime) > TaskTimeout {
+				Debug.Printf("map task %v timed out, reassigning", i)
+				task.Status = IN_PROGRESS // Reassign to new worker
+				task.StartTime = time.Now()
+				task.mu.Unlock()
+				return task
+			}
+			// Task is still in progress and hasn't timed out
+			task.mu.Unlock()
+			continue
 		case COMPLETED:
 			completedMapTasks++
+			task.mu.Unlock()
 		default:
 			task.mu.Unlock()
 			continue
 		}
-		task.mu.Unlock()
 	}
 
 	if len(m.mapTasks) == completedMapTasks {
+		completedReduceTasks = 0
 		for i := range m.reduceTasks {
 			task := &m.reduceTasks[i]
 			task.mu.Lock()
-			if task.Status == NOT_STARTED {
+			switch task.Status {
+			case NOT_STARTED:
 				task.Status = IN_PROGRESS
 				task.Category = REDUCE
 				task.StartTime = time.Now()
 				task.mu.Unlock()
 				Debug.Printf("found not started reduce task %v", i)
 				return task
+			case IN_PROGRESS:
+				// Check if task has timed out (more than 10 seconds)
+				if time.Since(task.StartTime) > TaskTimeout {
+					Debug.Printf("reduce task %v timed out, reassigning", i)
+					task.Status = IN_PROGRESS // Reassign to new worker
+					task.StartTime = time.Now()
+					task.mu.Unlock()
+					return task
+				}
+				// Task is still in progress and hasn't timed out
+				task.mu.Unlock()
+				continue
+			case COMPLETED:
+				completedReduceTasks++
+				task.mu.Unlock()
+			default:
+				task.mu.Unlock()
+				continue
 			}
-			task.mu.Unlock()
+		}
+
+		if len(m.reduceTasks) == completedReduceTasks {
+			Debug.Printf("all reduce tasks completed")
+			// all tasks are completed, so stop the program
+			os.Exit(0)
 		}
 	}
 	Debug.Printf("no not started tasks found")

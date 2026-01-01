@@ -86,7 +86,13 @@ func (w *worker) _worker(mapFn func(string, string) []KeyValue, reduceFn func(st
 			Error.Printf("cannot process reduce task: %v", err)
 			return
 		}
-		CallMarkTaskDone(*taskInfo)
+		success := CallMarkTaskDone(*taskInfo)
+		if success {
+			cleanUpIntermediateFiles(taskInfo.TaskNo, nMap)
+		} else {
+			Error.Printf("cannot mark reduce task as done")
+		}
+		return;
 	}
 }
 
@@ -169,6 +175,15 @@ func handleReduceTask(reduceFn func(string, []string) string, reduceTaskNo int, 
 	}
 
 	return nil
+}
+
+func cleanUpIntermediateFiles(reduceTaskNo int, nMap int) {
+	// Read all mr-X-Y files where Y == reduceTaskNo
+	for mapTaskNo := range nMap {
+		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
+		os.Remove(filename)
+		Debug.Printf("removed intermediate file %s", filename)
+	}
 }
 
 func decodeBucketContent(content string) []KeyValueFile {
