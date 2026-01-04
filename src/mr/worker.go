@@ -61,19 +61,19 @@ func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []strin
 		case WAIT:
 			Debug.Printf("got wait task")
 			sleepRandom(rng, 1000, 3000)
-			return;
+			continue;
 		case MAP:
 			err := handleMapTask(mapFn, taskInfo.Filename, taskInfo.TaskNo, reply.NReduce)
 			if err != nil {
 				Error.Printf("cannot write map output files: %v", err)
-				return
+				continue;
 			}
 			CallMarkTaskDone(taskInfo)
 		case REDUCE:
 			err := handleReduceTask(reduceFn, taskInfo.TaskNo, reply.NMap)
 			if err != nil {
 				Error.Printf("cannot process reduce task: %v", err)
-				return
+				continue;
 			}
 			success := CallMarkTaskDone(taskInfo)
 			if success {
@@ -81,7 +81,7 @@ func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []strin
 			} else {
 				Error.Printf("cannot mark reduce task as done")
 			}
-			return;
+			continue;
 		}
 	}
 }
