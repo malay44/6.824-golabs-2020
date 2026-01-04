@@ -17,15 +17,22 @@ import (
 
 type EmptyArgs struct{}
 
+type TaskStatus int
+type TaskCategory int
+
 // task status
-const NOT_STARTED = "not_started"
-const IN_PROGRESS = "in_progress"
-const COMPLETED = "completed"
+const (
+	NOT_STARTED TaskStatus = iota
+	IN_PROGRESS
+	COMPLETED
+)
 
 // task category
-const MAP = "map"
-const REDUCE = "reduce"
-const WAIT = "wait"
+const (
+	MAP TaskCategory = iota
+	REDUCE
+	WAIT
+)
 
 type Task struct {
 	TaskInfo
@@ -34,8 +41,8 @@ type Task struct {
 
 type TaskInfo struct {
 	Filename  string
-	Status    string
-	Category  string
+	Status    TaskStatus
+	Category  TaskCategory
 	StartTime time.Time
 	TaskNo    int
 }
