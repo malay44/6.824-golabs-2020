@@ -21,15 +21,6 @@ type Master struct {
 	reduceTasks []Task
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
 
 func (m *Master) GetTask(args *EmptyArgs, reply *GetTaskReply) error {
 	Debug.Printf("got task request")
