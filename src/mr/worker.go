@@ -324,6 +324,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	sockname := masterSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
+		Info.Println("Worker terminating with log.Fatal")
 		log.Fatal("dialing:", err)
 	}
 	defer c.Close()
