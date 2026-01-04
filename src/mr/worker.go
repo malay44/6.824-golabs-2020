@@ -27,13 +27,8 @@ type KeyValue struct {
 	Value string
 }
 
-type KeyValueFile struct {
-	KeyValue
-	filename string
-}
-
 // for sorting by key.
-type ByKey []KeyValueFile
+type ByKey []KeyValue
 
 // for sorting by key.
 func (a ByKey) Len() int           { return len(a) }
@@ -71,7 +66,7 @@ func (w *worker) _worker(mapFn func(string, string) []KeyValue, reduceFn func(st
 	switch taskInfo.Category {
 	case WAIT:
 		Debug.Printf("got wait task")
-		sleepRandom(w.rng, 200, 600)
+		sleepRandom(w.rng, 1000, 3000)
 		return;
 	case MAP:
 		err := handleMapTask(mapFn, taskInfo.Filename, taskInfo.TaskNo, nReduce)
@@ -124,7 +119,7 @@ func handleMapTask(mapFn func(string, string) []KeyValue, filename string, mapTa
 
 func handleReduceTask(reduceFn func(string, []string) string, reduceTaskNo int, nMap int) error {
 	// Read all mr-X-Y files where Y == reduceTaskNo
-	intermediate := []KeyValueFile{}
+	intermediate := []KeyValue{}
 	for mapTaskNo := range nMap {
 		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
 		file, err := os.Open(filename)
@@ -186,23 +181,15 @@ func cleanUpIntermediateFiles(reduceTaskNo int, nMap int) {
 	}
 }
 
-func decodeBucketContent(content string) []KeyValueFile {
+func decodeBucketContent(content string) []KeyValue {
 	// Decode entire JSON array at once
-	var kva []KeyValue
-	if err := json.Unmarshal([]byte(content), &kva); err != nil {
+	var kvs []KeyValue
+	if err := json.Unmarshal([]byte(content), &kvs); err != nil {
 		Debug.Printf("Failed to decode JSON array: %v\n", err)
-		return []KeyValueFile{} // Return empty slice on error
+		return []KeyValue{} // Return empty slice on error
 	}
 
-	// Convert []KeyValue to []KeyValueFile
-	kvf := make([]KeyValueFile, len(kva))
-	for i, kv := range kva {
-		kvf[i] = KeyValueFile{
-			KeyValue: kv,
-			filename: "", // Not needed in new design
-		}
-	}
-	return kvf
+	return kvs
 }
 
 // divideKeysInBuckets writes map output to mr-X-Y files where X is the map task number
