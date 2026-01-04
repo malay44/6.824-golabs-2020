@@ -15,11 +15,40 @@ import (
 )
 
 var (
-	// Create a specific logger for debug messages
-	Debug *log.Logger = log.New(os.Stdout, "DEBUG: ", log.Ldate|log.Ltime|log.Lshortfile)
-	Info  *log.Logger = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime)
-	Error *log.Logger = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile)
+	// Loggers controlled by environment variables:
+	// - MR_DEBUG: Set to "1" or "true" to enable debug logs (default: disabled)
+	// - MR_INFO: Set to "0" or "false" to disable info logs (default: enabled)
+	// - MR_ERROR: Set to "0" or "false" to disable error logs (default: enabled)
+	Debug *log.Logger = initLogger("MR_DEBUG", os.Stdout, "DEBUG: ", log.Ldate|log.Ltime|log.Lshortfile, true)
+	Info  *log.Logger = initLogger("MR_INFO", os.Stdout, "INFO: ", log.Ldate|log.Ltime, false)
+	Error *log.Logger = initLogger("MR_ERROR", os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile, false)
 )
+
+// initLogger creates a logger based on an environment variable
+// envVar: name of the environment variable to check
+// output: where to write logs (os.Stdout or os.Stderr)
+// prefix: log message prefix
+// flags: log flags (log.Ldate, log.Ltime, etc.)
+// defaultDisabled: if true, logger is disabled by default (enabled when env var is set)
+//                  if false, logger is enabled by default (disabled when env var is "0" or "false")
+func initLogger(envVar string, output io.Writer, prefix string, flags int, defaultDisabled bool) *log.Logger {
+	envValue := os.Getenv(envVar)
+	
+	var enabled bool
+	if defaultDisabled {
+		// For debug: enabled only if env var is set and not "0" or "false"
+		enabled = envValue != "" && envValue != "0" && envValue != "false"
+	} else {
+		// For info/error: enabled by default, disabled only if env var is "0" or "false"
+		enabled = envValue == "" || (envValue != "0" && envValue != "false")
+	}
+	
+	if enabled {
+		return log.New(output, prefix, flags)
+	}
+	// Logger disabled - use io.Discard to suppress output
+	return log.New(io.Discard, "", 0)
+}
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -273,7 +302,10 @@ func CallGetTask() (*GetTaskReply, bool) {
 	args := EmptyArgs{}
 	reply := GetTaskReply{}
 
-	call("Master.GetTask", &args, &reply)
+	ok := call("Master.GetTask", &args, &reply)
+	if !ok {
+		return nil, false
+	}
 	return &reply, true
 }
 
