@@ -30,10 +30,10 @@ var (
 // prefix: log message prefix
 // flags: log flags (log.Ldate, log.Ltime, etc.)
 // defaultDisabled: if true, logger is disabled by default (enabled when env var is set)
-//                  if false, logger is enabled by default (disabled when env var is "0" or "false")
+// if false, logger is enabled by default (disabled when env var is "0" or "false")
 func initLogger(envVar string, output io.Writer, prefix string, flags int, defaultDisabled bool) *log.Logger {
 	envValue := os.Getenv(envVar)
-	
+
 	var enabled bool
 	if defaultDisabled {
 		// For debug: enabled only if env var is set and not "0" or "false"
@@ -42,7 +42,7 @@ func initLogger(envVar string, output io.Writer, prefix string, flags int, defau
 		// For info/error: enabled by default, disabled only if env var is "0" or "false"
 		enabled = envValue == "" || (envValue != "0" && envValue != "false")
 	}
-	
+
 	if enabled {
 		return log.New(output, prefix, flags)
 	}
@@ -56,6 +56,15 @@ type KeyValue struct {
 	Value string
 }
 
+// Create temp files and encoders for each reduce partition
+type fileEncoder struct {
+	file      *os.File
+	enc       *json.Encoder
+	tempName  string
+	finalName string
+}
+type fes []*fileEncoder
+
 // for sorting by key.
 type ByKey []KeyValue
 
@@ -63,6 +72,16 @@ type ByKey []KeyValue
 func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+// Clean up any files we've already created
+func (fe fes) remove() {
+	for _, fe := range fe {
+		if fe != nil {
+			fe.file.Close()
+			os.Remove(fe.file.Name())
+		}
+	}
+}
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -74,7 +93,7 @@ func ihash(key string) int {
 
 // main/mrworker.go calls this function.
 func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []string) string) {
-	
+
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for true {
@@ -82,7 +101,7 @@ func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []strin
 		if !ok {
 			Error.Printf("cannot get task")
 			sleepRandom(rng, 1000, 3000)
-			continue;
+			continue
 		}
 		taskInfo := reply.TaskInfo
 
@@ -90,19 +109,19 @@ func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []strin
 		case WAIT:
 			Debug.Printf("got wait task")
 			sleepRandom(rng, 1000, 3000)
-			continue;
+			continue
 		case MAP:
 			err := handleMapTask(mapFn, taskInfo.Filename, taskInfo.TaskNo, reply.NReduce)
 			if err != nil {
 				Error.Printf("cannot write map output files: %v", err)
-				continue;
+				continue
 			}
 			CallMarkTaskDone(taskInfo)
 		case REDUCE:
 			err := handleReduceTask(reduceFn, taskInfo.TaskNo, reply.NMap)
 			if err != nil {
 				Error.Printf("cannot process reduce task: %v", err)
-				continue;
+				continue
 			}
 			success := CallMarkTaskDone(taskInfo)
 			if success {
@@ -110,7 +129,7 @@ func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []strin
 			} else {
 				Error.Printf("cannot mark reduce task as done")
 			}
-			continue;
+			continue
 		}
 	}
 }
@@ -153,14 +172,16 @@ func handleReduceTask(reduceFn func(string, []string) string, reduceTaskNo int, 
 			continue
 		}
 
-		content, err := io.ReadAll(file)
-		file.Close() // Close immediately after reading
-		if err != nil {
-			return fmt.Errorf("cannot read %v: %v", filename, err)
+		// Read key/value pairs using json.NewDecoder
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
 		}
-
-		kvf := decodeBucketContent(string(content))
-		intermediate = append(intermediate, kvf...)
+		file.Close()
 	}
 
 	sort.Sort(ByKey(intermediate))
@@ -205,94 +226,59 @@ func cleanUpIntermediateFiles(reduceTaskNo int, nMap int) {
 	}
 }
 
-func decodeBucketContent(content string) []KeyValue {
-	// Decode entire JSON array at once
-	var kvs []KeyValue
-	if err := json.Unmarshal([]byte(content), &kvs); err != nil {
-		Debug.Printf("Failed to decode JSON array: %v\n", err)
-		return []KeyValue{} // Return empty slice on error
-	}
-
-	return kvs
-}
-
-// divideKeysInBuckets writes map output to mr-X-Y files where X is the map task number
-// and Y is the reduce partition number. Uses atomic writes (temp file + rename) for safety.
 func divideKeysInBuckets(kva []KeyValue, mapTaskNo int, nReduce int) error {
 	if kva == nil {
 		return fmt.Errorf("kva cannot be nil pointer")
 	}
 
-	// Partition keys into reduce buckets
-	buckets := make([][]KeyValue, nReduce)
+	files := make(fes, nReduce)
+
+	// Initialize temp files and encoders for each reduce partition
+	for reduceTaskNo := range nReduce {
+		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
+		tempFilename := filename + ".tmp"
+
+		file, err := os.Create(tempFilename)
+		if err != nil {
+			files.remove()
+			return fmt.Errorf("failed to create temp file %v: %v", tempFilename, err)
+		}
+
+		files[reduceTaskNo] = &fileEncoder{
+			file:      file,
+			enc:       json.NewEncoder(file),
+			tempName:  tempFilename,
+			finalName: filename,
+		}
+	}
+
+	// Write each key/value pair incrementally to the appropriate file
 	for _, kv := range kva {
 		bucketNo := ihash(kv.Key) % nReduce
-		buckets[bucketNo] = append(buckets[bucketNo], kv)
+		if err := files[bucketNo].enc.Encode(&kv); err != nil {
+			files.remove()
+			return fmt.Errorf("failed to encode key/value pair: %v", err)
+		}
 	}
 
-	// Write each bucket to its own file atomically as a JSON array
-	for reduceTaskNo, bucket := range buckets {
-		if len(bucket) == 0 {
-			Debug.Printf("Map task %d: Empty content for reduce partition %d\n", mapTaskNo, reduceTaskNo)
-			continue
+	// Close, sync, and atomically rename all files
+	for _, fe := range files {
+		if err := fe.file.Sync(); err != nil {
+			files.remove()
+			return fmt.Errorf("failed to sync file %v: %v", fe.tempName, err)
 		}
 
-		// Encode entire bucket as a JSON array
-		jsonData, err := json.Marshal(bucket)
-		if err != nil {
-			return fmt.Errorf("failed to marshal bucket %d: %v", reduceTaskNo, err)
+		if err := fe.file.Close(); err != nil {
+			files.remove()
+			return fmt.Errorf("failed to close file %v: %v", fe.tempName, err)
 		}
 
-		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
-		err = writeFileAtomically(filename, string(jsonData))
-		if err != nil {
-			return fmt.Errorf("failed to write %v: %v", filename, err)
+		if err := os.Rename(fe.tempName, fe.finalName); err != nil {
+			files.remove()
+			return fmt.Errorf("failed to rename %v to %v: %v", fe.tempName, fe.finalName, err)
 		}
-		Debug.Printf("Map task %d: wrote output to %v\n", mapTaskNo, filename)
-	}
-	return nil
-}
 
-// writeFileAtomically writes content to filename atomically by:
-// 1. Writing to a temporary file
-// 2. Syncing the file to disk
-// 3. Renaming the temp file to the final filename
-// This ensures that readers either see the complete file or nothing (no partial writes).
-func writeFileAtomically(filename, content string) error {
-	// Create temporary file in the same directory
-	tempFilename := filename + ".tmp"
-	
-	file, err := os.Create(tempFilename)
-	if err != nil {
-		return err
-	}
-
-	_, err = file.WriteString(content)
-	if err != nil {
-		file.Close()
-		os.Remove(tempFilename)
-		return err
-	}
-
-	// Sync to ensure data is written to disk before rename
-	err = file.Sync()
-	if err != nil {
-		file.Close()
-		os.Remove(tempFilename)
-		return err
-	}
-
-	err = file.Close()
-	if err != nil {
-		os.Remove(tempFilename)
-		return err
-	}
-
-	// Atomic rename: either succeeds completely or fails (no partial state)
-	err = os.Rename(tempFilename, filename)
-	if err != nil {
-		os.Remove(tempFilename)
-		return err
+		Debug.Printf("Map task %d: wrote output to %v\n", mapTaskNo, fe.finalName)
 	}
 
 	return nil
