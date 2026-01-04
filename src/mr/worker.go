@@ -6,10 +6,11 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"maps"
 	"math/rand"
 	"net/rpc"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -65,14 +66,6 @@ type fileEncoder struct {
 }
 type fes []*fileEncoder
 
-// for sorting by key.
-type ByKey []KeyValue
-
-// for sorting by key.
-func (a ByKey) Len() int           { return len(a) }
-func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
-
 // Clean up any files we've already created
 func (fe fes) remove() {
 	for _, fe := range fe {
@@ -124,9 +117,7 @@ func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []strin
 				continue
 			}
 			success := CallMarkTaskDone(taskInfo)
-			if success {
-				cleanUpIntermediateFiles(taskInfo.TaskNo, reply.NMap)
-			} else {
+			if !success {
 				Error.Printf("cannot mark reduce task as done")
 			}
 			continue
@@ -162,9 +153,9 @@ func handleMapTask(mapFn func(string, string) []KeyValue, filename string, mapTa
 
 func handleReduceTask(reduceFn func(string, []string) string, reduceTaskNo int, nMap int) error {
 	// Read all mr-X-Y files where Y == reduceTaskNo
-	intermediate := []KeyValue{}
+	kvMap := map[string][]string{}
 	for mapTaskNo := range nMap {
-		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
+		filename := fmt.Sprintf("%v/mr-%d-%d", intermediateDir, mapTaskNo, reduceTaskNo)
 		file, err := os.Open(filename)
 		if err != nil {
 			// File might not exist if map task produced no output for this reduce partition
@@ -179,51 +170,37 @@ func handleReduceTask(reduceFn func(string, []string) string, reduceTaskNo int, 
 			if err := dec.Decode(&kv); err != nil {
 				break
 			}
-			intermediate = append(intermediate, kv)
+			kvMap[kv.Key] = append(kvMap[kv.Key], kv.Value)
 		}
 		file.Close()
 	}
 
-	sort.Sort(ByKey(intermediate))
+	sortedKeys := slices.Sorted(maps.Keys(kvMap))
 	oname := "mr-out-" + strconv.Itoa(reduceTaskNo)
-	ofile, err := os.Create(oname)
+	tempOname := intermediateDir + oname
+	tempOfile, err := os.Create(tempOname)
 	if err != nil {
 		return err
 	}
-	defer ofile.Close()
+	defer tempOfile.Close()
 
 	//
 	// call Reduce on each distinct key in intermediate[],
 	// and print the result to mr-out-Y.
 	//
-	i := 0
-	for i < len(intermediate) {
-		j := i + 1
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			j++
+	for _, key := range sortedKeys {
+		output := reduceFn(key, kvMap[key])
+		_, err := fmt.Fprintf(tempOfile, "%v %v\n", key, output)
+		if err != nil {
+			Error.Printf("reduce task %d not able to write to file: %v", reduceTaskNo, tempOfile)
 		}
-		values := []string{}
-		for k := i; k < j; k++ {
-			values = append(values, intermediate[k].Value)
-		}
-		output := reduceFn(intermediate[i].Key, values)
+	}
 
-		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-
-		i = j
+	if err := os.Rename(tempOfile.Name(), oname); err != nil {
+		return fmt.Errorf("failed to rename %v to %v: %v", tempOfile.Name(), oname, err)
 	}
 
 	return nil
-}
-
-func cleanUpIntermediateFiles(reduceTaskNo int, nMap int) {
-	// Read all mr-X-Y files where Y == reduceTaskNo
-	for mapTaskNo := range nMap {
-		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
-		os.Remove(filename)
-		Debug.Printf("removed intermediate file %s", filename)
-	}
 }
 
 func divideKeysInBuckets(kva []KeyValue, mapTaskNo int, nReduce int) error {
@@ -235,7 +212,7 @@ func divideKeysInBuckets(kva []KeyValue, mapTaskNo int, nReduce int) error {
 
 	// Initialize temp files and encoders for each reduce partition
 	for reduceTaskNo := range nReduce {
-		filename := fmt.Sprintf("mr-%d-%d", mapTaskNo, reduceTaskNo)
+		filename := fmt.Sprintf("%v/mr-%d-%d", intermediateDir, mapTaskNo, reduceTaskNo)
 		tempFilename := filename + ".tmp"
 
 		file, err := os.Create(tempFilename)

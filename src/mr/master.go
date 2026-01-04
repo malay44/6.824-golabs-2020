@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"time"
 )
 
 const (
-	TaskTimeout = 10 * time.Second // Timeout for task completion
+	TaskTimeout     = 10 * time.Second // Timeout for task completion
+	intermediateDir = "inter/"
 )
 
 type Master struct {
@@ -20,7 +22,6 @@ type Master struct {
 	mapTasks    []Task
 	reduceTasks []Task
 }
-
 
 func (m *Master) GetTask(args *EmptyArgs, reply *GetTaskReply) error {
 	Debug.Printf("got task request")
@@ -215,6 +216,24 @@ func MakeMaster(files []string, nReduce int) *Master {
 		nMap:        len(files),
 		mapTasks:    mapTasks,
 		reduceTasks: reduceTasks,
+	}
+
+	// clean up old files if any and create intermediate directory
+	outFiles, _ := filepath.Glob("mr-out*")
+	for _, file := range outFiles {
+		if err := os.Remove(file); err != nil {
+			Error.Fatal(err)
+		}
+	}
+
+	err := os.RemoveAll(intermediateDir)
+	if err != nil {
+		Error.Fatal(err)
+	}
+
+	err = os.Mkdir(intermediateDir, 0755)
+	if err != nil {
+		Error.Fatal(err)
 	}
 
 	m.server()
