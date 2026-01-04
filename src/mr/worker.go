@@ -35,10 +35,6 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-type worker struct {
-	rng *rand.Rand
-}
-
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -50,44 +46,43 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []string) string) {
 	
-	w := worker{
-		// Create per-call RNG (avoids contention & predictable sequences)
-		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
-	}
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for true {
-		w._worker(mapFn, reduceFn)
-	}
-}
+		reply, ok := CallGetTask()
+		if !ok {
+			Error.Printf("cannot get task")
+			sleepRandom(rng, 1000, 3000)
+			continue;
+		}
+		taskInfo := reply.TaskInfo
 
-func (w *worker) _worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []string) string) {
-	taskInfo, nReduce, nMap := CallGetTask()
-
-	switch taskInfo.Category {
-	case WAIT:
-		Debug.Printf("got wait task")
-		sleepRandom(w.rng, 1000, 3000)
-		return;
-	case MAP:
-		err := handleMapTask(mapFn, taskInfo.Filename, taskInfo.TaskNo, nReduce)
-		if err != nil {
-			Error.Printf("cannot write map output files: %v", err)
-			return
+		switch taskInfo.Category {
+		case WAIT:
+			Debug.Printf("got wait task")
+			sleepRandom(rng, 1000, 3000)
+			return;
+		case MAP:
+			err := handleMapTask(mapFn, taskInfo.Filename, taskInfo.TaskNo, reply.NReduce)
+			if err != nil {
+				Error.Printf("cannot write map output files: %v", err)
+				return
+			}
+			CallMarkTaskDone(taskInfo)
+		case REDUCE:
+			err := handleReduceTask(reduceFn, taskInfo.TaskNo, reply.NMap)
+			if err != nil {
+				Error.Printf("cannot process reduce task: %v", err)
+				return
+			}
+			success := CallMarkTaskDone(taskInfo)
+			if success {
+				cleanUpIntermediateFiles(taskInfo.TaskNo, reply.NMap)
+			} else {
+				Error.Printf("cannot mark reduce task as done")
+			}
+			return;
 		}
-		CallMarkTaskDone(*taskInfo)
-	case REDUCE:
-		err := handleReduceTask(reduceFn, taskInfo.TaskNo, nMap)
-		if err != nil {
-			Error.Printf("cannot process reduce task: %v", err)
-			return
-		}
-		success := CallMarkTaskDone(*taskInfo)
-		if success {
-			cleanUpIntermediateFiles(taskInfo.TaskNo, nMap)
-		} else {
-			Error.Printf("cannot mark reduce task as done")
-		}
-		return;
 	}
 }
 
@@ -274,12 +269,12 @@ func writeFileAtomically(filename, content string) error {
 	return nil
 }
 
-func CallGetTask() (*TaskInfo, int, int) {
+func CallGetTask() (*GetTaskReply, bool) {
 	args := EmptyArgs{}
 	reply := GetTaskReply{}
 
 	call("Master.GetTask", &args, &reply)
-	return &reply.TaskInfo, reply.NReduce, reply.NMap
+	return &reply, true
 }
 
 func CallMarkTaskDone(taskInfo TaskInfo) bool {
