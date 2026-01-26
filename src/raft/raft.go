@@ -214,21 +214,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	rf.Logger.Printf("Sent vote request to node: %v for term: %v", server, args.Term)
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.Logger.Printf("Got vote response from node: %v for term: %v, response: %v", server, args.Term, reply)
+	return ok
+}
+
+func (rf *Raft) requestVotes() bool {
+	rf.mu.Lock()
+	majority := len(rf.peers)/2 + 1
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: len(rf.logs),
 		LastLogTerm:  rf.currentTerm,
 	}
-	rf.Logger.Printf("Sent vote request to node: %v for term: %v", server, args.Term)
-	ok := rf.peers[server].Call("Raft.RequestVote", &args, reply)
-	rf.Logger.Printf("Got vote response from node: %v for term: %v, response: %v", server, args.Term, reply)
-	return ok
-}
-
-func (rf *Raft) requestVotes() bool {
-	majority := len(rf.peers)/2 + 1
+	rf.mu.Unlock()
 
 	votes := 1 // self vote
 	voteCh := make(chan bool, len(rf.peers))
@@ -241,7 +243,7 @@ func (rf *Raft) requestVotes() bool {
 		peer := i
 		go func() {
 			reply := RequestVoteReply{}
-			ok := rf.sendRequestVote(peer, &reply)
+			ok := rf.sendRequestVote(peer, &args, &reply)
 			if !ok {
 				voteCh <- false
 				return
