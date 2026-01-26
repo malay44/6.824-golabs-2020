@@ -474,11 +474,11 @@ func (rf *Raft) handleElectionTimeout() {
 		}
 		rf.mu.Unlock()
 		rf.Logger.Println("Node timeout, starting election")
-		rf.startElectionLocked()
+		rf.startElection()
 	}
 }
 
-func (rf *Raft) startElectionLocked() {
+func (rf *Raft) startElection() {
 	rf.Logger.Print("Election Started")
 	rf.mu.Lock()
 	rf.role = CANDIDATE
