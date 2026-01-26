@@ -92,6 +92,7 @@ func Worker(mapFn func(string, string) []KeyValue, reduceFn func(string, []strin
 	for true {
 		reply, ok := CallGetTask()
 		if !ok {
+			
 			Error.Printf("cannot get task")
 			sleepRandom(rng, 1000, 3000)
 			continue
