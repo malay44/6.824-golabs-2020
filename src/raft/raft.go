@@ -268,8 +268,8 @@ func (rf *Raft) requestVotes() bool {
 
 	responses := 1
 	for {
-		voteRes := <- voteCh
-		
+		voteRes := <-voteCh
+
 		// detect step-down
 		rf.mu.Lock()
 		role := rf.role
@@ -340,14 +340,14 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntriesArgs, re
 }
 
 func (rf *Raft) sendHeartbeats() {
+	rf.mu.Lock()
 	args := RequestAppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: len(rf.logs) - 1,
 	}
-	var wg sync.WaitGroup
+	rf.mu.Unlock()
 
-	wg.Add(len(rf.peers) - 1)
 	for i := range rf.peers {
 		nodeId := i
 		if nodeId == rf.me {
@@ -360,7 +360,6 @@ func (rf *Raft) sendHeartbeats() {
 			}
 		}()
 	}
-	wg.Wait()
 }
 
 func (rf *Raft) startHeartbeatLoop() {
