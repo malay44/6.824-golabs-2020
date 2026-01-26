@@ -99,6 +99,8 @@ type Raft struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.Logger.Printf("returning state (term: %v), (role: %v)", rf.currentTerm, ROLES[rf.role])
 	return rf.currentTerm, rf.role == LEADER
 }
