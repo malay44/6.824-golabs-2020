@@ -63,7 +63,6 @@ const (
 
 var ROLES = [...]string{"FOLLOWER", "CANDIDATE", "LEADER"}
 
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -168,8 +167,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	// Per Extended Raft paper Figure 2: 
-	// "If RPC request or response contains term T > currentTerm: 
+	// Per Extended Raft paper Figure 2:
+	// "If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower "
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -221,7 +220,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) requestVotes() bool {
+func (rf *Raft) requestVotes(ctx context.Context) bool {
 	rf.mu.Lock()
 	majority := len(rf.peers)/2 + 1
 	args := RequestVoteArgs{
@@ -268,31 +267,31 @@ func (rf *Raft) requestVotes() bool {
 
 	responses := 1
 	for {
-		voteRes := <-voteCh
+		select {
+		case voteRes := <-voteCh:
+			// detect step-down
+			rf.mu.Lock()
+			role := rf.role
+			rf.mu.Unlock()
+			if role != CANDIDATE {
+				return false
+			}
 
-		// detect step-down
-		rf.mu.Lock()
-		role := rf.role
-		rf.mu.Unlock()
-		if role != CANDIDATE {
-			return false
-		}
-
-		responses++
-		if voteRes {
-			votes++
-		}
-		if votes >= majority {
-			return true
-		}
-		if responses == len(rf.peers) {
+			responses++
+			if voteRes {
+				votes++
+			}
+			if votes >= majority {
+				return true
+			}
+			if responses == len(rf.peers) {
+				return false
+			}
+		case <-ctx.Done():
 			return false
 		}
 	}
 }
-
-
-
 
 type RequestAppendEntriesArgs struct {
 	Term            int
@@ -386,7 +385,7 @@ func (rf *Raft) startHeartbeatLoop() {
 
 		case <-ticker.C:
 			rf.mu.Lock()
-			
+
 			if rf.role != LEADER {
 				rf.stopHeartbeat()
 				rf.mu.Unlock()
@@ -470,7 +469,7 @@ func (rf *Raft) handleElectionTimeout() {
 
 		if rf.role == LEADER {
 			rf.mu.Unlock()
-			return
+			continue
 		}
 		rf.mu.Unlock()
 		rf.Logger.Println("Node timeout, starting election")
@@ -487,7 +486,10 @@ func (rf *Raft) startElection() {
 	rf.resetElectionTimerLocked()
 	rf.mu.Unlock()
 
-	if won := rf.requestVotes(); won {
+	ctx, cancelRequestVote := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancelRequestVote()
+
+	if won := rf.requestVotes(ctx); won {
 		rf.Logger.Print("Election Won")
 		rf.mu.Lock()
 
@@ -497,6 +499,9 @@ func (rf *Raft) startElection() {
 		go rf.startHeartbeatLoop()
 	} else {
 		rf.Logger.Print("Election Lost")
+		rf.mu.Lock()
+		rf.votedFor = -1
+		rf.mu.Unlock()
 	}
 }
 
@@ -517,11 +522,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.votedFor = -1
 	rf.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-	
+
 	// timing durations
 	rf.electionTimeoutDuration = time.Millisecond * 200
 	rf.heartbeatInterval = rf.electionTimeoutDuration / 2
-	
+
 	rf.Logger = log.New(io.Discard, fmt.Sprintf("[Node:%v]: ", rf.me), log.Ldate|log.Ltime|log.Lmicroseconds|log.Lshortfile)
 
 	// Your initialization code here (2A, 2B, 2C).
