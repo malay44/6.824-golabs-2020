@@ -7,3 +7,6 @@ mrtmp.*
 /kvpaxos/x.txt
 *.so
 .DS_Store
+
+# for output txt files
+out_*.txt
