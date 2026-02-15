@@ -374,6 +374,7 @@ func (rf *Raft) AppendEntries(args *RequestAppendEntriesArgs, reply *RequestAppe
 	lastNewIndex := len(rf.logs) - 1
 	if args.LeaderCommitIdx > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommitIdx, lastNewIndex)
+		go rf.applyLogs()
 	}
 
 	reply.Success = true
@@ -447,13 +448,15 @@ func (rf *Raft) sendHeartbeats() {
 					}
 					if count >= len(rf.peers)/2+1 {
 						rf.commitIndex = n
+						go rf.applyLogs()
 						break
 					}
 				}
 			} else {
-				// Log inconsistency: decrement nextIndex and retry (5.3)
+				// Log inconsistency: decrement nextIndex and retry immediately (5.3)
 				if rf.nextIndex[server] > 1 {
 					rf.nextIndex[server]--
+					go rf.sendHeartbeats()
 				}
 			}
 		}()
@@ -518,6 +521,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.matchIndex[rf.me] = len(rf.logs) - 1
 	rf.nextIndex[rf.me] = len(rf.logs)
 	index := len(rf.logs) - 1
+	go rf.sendHeartbeats()
 	return index, rf.currentTerm, true
 }
 
@@ -618,22 +622,23 @@ func (rf *Raft) startElection() {
 // applier runs in the background and applies committed entries to the state machine (5.3).
 func (rf *Raft) applier() {
 	for !rf.killed() {
-		rf.mu.Lock()
-		for rf.commitIndex <= rf.lastApplied || rf.lastApplied+1 >= len(rf.logs) {
-			rf.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
-			rf.mu.Lock()
-		}
-		index := rf.lastApplied + 1
-		cmd := rf.logs[index].Command
-		rf.mu.Unlock()
-
-		rf.applyCh <- ApplyMsg{CommandValid: true, Command: cmd, CommandIndex: index}
-
-		rf.mu.Lock()
-		rf.lastApplied = index
-		rf.mu.Unlock()
+		rf.applyLogs()
+		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func (rf *Raft) applyLogs() {
+	rf.mu.Lock()
+	if rf.commitIndex <= rf.lastApplied || rf.lastApplied+1 >= len(rf.logs) {
+		rf.mu.Unlock()
+		return
+	}
+	index := rf.lastApplied + 1
+	cmd := rf.logs[index].Command
+	rf.lastApplied = index
+	rf.mu.Unlock()
+
+	rf.applyCh <- ApplyMsg{CommandValid: true, Command: cmd, CommandIndex: index}
 }
 
 // the service or tester wants to create a Raft server. the ports
